@@ -70,21 +70,21 @@ class RegisterVehicleTests {
     }
 
     @Test
-    void shouldShowErrorToastWhenVinIsInvalid() {
-        // VIN de 16 chars — el frontend puede no validar longitud, el backend sí
-        // Si el frontend JS valida → puede que tampoco llegue al backend
-        // En cualquier caso, la placa es válida → si hay toast, es de error del backend
-        VehicleData data = new VehicleData(
-                TestDataGenerator.uniquePlate(),
-                "INVALIDVIN16CHR1",   // 16 chars — inválido (se requieren 17)
-                "Honda", "Civic", "2022", "Gasolina", VehicleType.SEDAN.text()
-        );
+    void shouldShowErrorToastWhenRegisteringDuplicatePlate() {
+        // El backend rechaza placas duplicadas → debe aparecer toast de error
+        // Precondición: registrar el vehículo una primera vez
+        VehicleData data = TestDataGenerator.uniqueVehicleData(VehicleType.SEDAN);
+        hans.attemptsTo(NavigateTo.theRegisterPage());
+        hans.attemptsTo(RegisterVehicle.with(data));
+        hans.attemptsTo(WaitForToast.toAppear());
+        hans.attemptsTo(WaitForToast.toDisappear());
 
+        // Segunda vez con la misma placa → error de duplicado
         hans.attemptsTo(NavigateTo.theRegisterPage());
         hans.attemptsTo(RegisterVehicle.with(data));
         hans.attemptsTo(WaitForToast.toAppear());
 
-        // El toast de error debe aparecer (backend rechaza VIN con longitud incorrecta)
+        // El toast debe ser de error — placa ya registrada
         hans.should(seeThat(Toast.isVisible(), is(true)));
     }
 }

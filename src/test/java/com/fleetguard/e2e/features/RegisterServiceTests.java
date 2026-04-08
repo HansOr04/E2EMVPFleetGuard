@@ -1,7 +1,11 @@
 package com.fleetguard.e2e.features;
 
+import com.fleetguard.e2e.screenplay.mileage.MileageData;
+import com.fleetguard.e2e.screenplay.mileage.UpdateMileage;
 import com.fleetguard.e2e.screenplay.navigation.NavigateTo;
 import com.fleetguard.e2e.screenplay.notifications.Toast;
+import com.fleetguard.e2e.screenplay.rules.CreateMaintenanceRule;
+import com.fleetguard.e2e.screenplay.rules.MaintenanceRuleType;
 import com.fleetguard.e2e.screenplay.services.QueryAlerts;
 import com.fleetguard.e2e.screenplay.services.RegisterService;
 import com.fleetguard.e2e.screenplay.services.ServiceData;
@@ -10,6 +14,7 @@ import com.fleetguard.e2e.screenplay.utils.TestDataGenerator;
 import com.fleetguard.e2e.screenplay.utils.WaitForToast;
 import com.fleetguard.e2e.screenplay.vehicle.RegisterVehicle;
 import com.fleetguard.e2e.screenplay.vehicle.VehicleData;
+import com.fleetguard.e2e.screenplay.vehicle.VehicleType;
 import net.serenitybdd.junit5.SerenityJUnit5Extension;
 import net.serenitybdd.screenplay.Actor;
 import net.serenitybdd.screenplay.annotations.CastMember;
@@ -23,7 +28,6 @@ import static org.hamcrest.Matchers.is;
 
 /**
  * Tests para /services — Registro de Servicios.
- * Orden en el flujo completo: PASO 5-6 (después de km update y espera de alertas).
  */
 @ExtendWith(SerenityJUnit5Extension.class)
 class RegisterServiceTests {
@@ -33,15 +37,13 @@ class RegisterServiceTests {
 
     @Test
     void shouldQueryAlertsForExistingVehicle() {
-        // Precondición: vehículo recién registrado a 0 km → sin historial de alertas
+        // Vehículo recién registrado a 0 km → sin historial → "No hay alertas activas"
         VehicleData vehicle = TestDataGenerator.uniqueVehicleData();
         hans.attemptsTo(NavigateTo.theRegisterPage());
         hans.attemptsTo(RegisterVehicle.with(vehicle));
         hans.attemptsTo(WaitForToast.toAppear());
         hans.attemptsTo(WaitForToast.toDisappear());
 
-        // Consultar alertas: vehículo a 0 km → kmRemaining > warningThreshold → SIN ALERTA
-        // El sistema muestra el mensaje "No hay alertas activas para este vehículo"
         hans.attemptsTo(NavigateTo.theServicesPage());
         hans.attemptsTo(QueryAlerts.forPlate(vehicle.plate()));
 
@@ -55,24 +57,18 @@ class RegisterServiceTests {
 
     @Test
     void shouldShowFeedbackWhenPlateHasNoHistory() {
-        // Placa sin historial → el backend retorna toast de error o mensaje inline
-        // Se acepta cualquiera de las dos respuestas: toast o mensaje "no hay alertas"
+        // Placa sin historial → backend retorna error (toast) o mensaje inline
         hans.attemptsTo(NavigateTo.theServicesPage());
         hans.attemptsTo(QueryAlerts.forPlate("SINALER01"));
 
-        // Esperar hasta 8s que aparezca el toast (error de backend) o el mensaje inline
-        // El backend puede tardar en responder con error 404 para placa inexistente
         try {
             hans.attemptsTo(
                     WaitUntil.the(ServicesForm.NO_ALERTS_MESSAGE, isVisible()).forNoMoreThan(8).seconds()
             );
         } catch (Exception ignored) {
-            // Si no aparece el mensaje inline, puede ser toast — también válido
+            // Si no aparece mensaje inline, puede ser toast de error — también válido
         }
 
-        // Si el backend respondió con error → toast visible
-        // Si respondió con vacío → NO_ALERTS_MESSAGE visible
-        // En cualquier caso, la página muestra algún feedback
         hans.should(seeThat(
                 actor -> {
                     boolean toastVisible = Toast.isVisible().answeredBy(actor);
@@ -89,31 +85,53 @@ class RegisterServiceTests {
     }
 
     @Test
-    void shouldRegisterServiceWhenAlertExists() {
-        /**
-         * Requiere placa "TEST01" con alertas activas pre-cargadas vía seed data.
-         * Si "TEST01" no existe en el entorno, este test fallará intencionalmente.
-         */
-        String plateWithAlert = "TEST01";
+    void shouldRegisterServiceWhenAlertExists() throws InterruptedException {
+        // Setup completo inline: vehículo → regla → km en rango PENDING → alerta → servicio
+        // ACEITE_MOTOR_LIVIANO: intervalKm=5000, warningThresholdKm=500
+        // Registrar 4750 km → dueAtKm=5000, kmRemaining=250 → PENDING ✓
 
+        // Paso 1: Registrar vehículo
+        VehicleData vehicle = TestDataGenerator.uniqueVehicleData(VehicleType.SEDAN);
+        hans.attemptsTo(NavigateTo.theRegisterPage());
+        hans.attemptsTo(RegisterVehicle.with(vehicle));
+        hans.attemptsTo(WaitForToast.toAppear());
+        hans.attemptsTo(WaitForToast.toDisappear());
+
+        // Paso 2: Crear regla de mantenimiento
+        hans.attemptsTo(NavigateTo.theRulesPage());
+        hans.attemptsTo(CreateMaintenanceRule.with(
+                TestDataGenerator.ruleFor(MaintenanceRuleType.ACEITE_MOTOR_LIVIANO, VehicleType.SEDAN)
+        ));
+        hans.attemptsTo(WaitForToast.toAppear());
+        hans.attemptsTo(WaitForToast.toDisappear());
+
+        // Paso 3: Actualizar km en zona PENDING (4750 km para intervalKm=5000)
+        long pendingKm = 5000L - 500L / 2; // = 4750
+        hans.attemptsTo(NavigateTo.theMileagePage());
+        hans.attemptsTo(UpdateMileage.with(TestDataGenerator.mileageFor(vehicle.plate(), pendingKm)));
+        hans.attemptsTo(WaitForToast.toAppear());
+        hans.attemptsTo(WaitForToast.toDisappear());
+
+        // Paso 4: Esperar procesamiento asíncrono RabbitMQ
+        Thread.sleep(5000);
+
+        // Paso 5: Consultar alertas y verificar que hay al menos una
         hans.attemptsTo(NavigateTo.theServicesPage());
-        hans.attemptsTo(QueryAlerts.forPlate(plateWithAlert));
-
-        // Verificar que hay alertas disponibles antes de intentar registrar servicio
+        hans.attemptsTo(QueryAlerts.forPlate(vehicle.plate()));
         hans.attemptsTo(
-                WaitUntil.the(ServicesForm.FIRST_ALERT, isVisible()).forNoMoreThan(10).seconds()
+                WaitUntil.the(ServicesForm.FIRST_ALERT, isVisible()).forNoMoreThan(15).seconds()
         );
 
+        // Paso 6: Registrar servicio
         ServiceData serviceData = new ServiceData(
-                plateWithAlert,
+                vehicle.plate(),
                 "Técnico E2E",
                 TestDataGenerator.today(),
                 "Taller E2E",
                 "150.00",
                 "Mantenimiento preventivo automatizado",
-                "50000"
+                String.valueOf(pendingKm)
         );
-
         hans.attemptsTo(RegisterService.with(serviceData));
         hans.attemptsTo(WaitForToast.toAppear());
 
