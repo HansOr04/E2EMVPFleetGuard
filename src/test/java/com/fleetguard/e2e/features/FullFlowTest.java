@@ -77,8 +77,12 @@ class FullFlowTest {
         hans.attemptsTo(WaitForToast.toDisappear());
 
         // ── PASO 3: Actualizar kilometraje ────────────────────────────────
-        // 6000 km > intervalKm(5000) → el rules-alerts-service generará la alerta
-        long tripKm = (long) rule.intervalKm() + 1000L; // 5000 + 1000 = 6000
+        // Lógica de alerta: dueAtKm = ceil(mileage/intervalKm)*intervalKm
+        // Para PENDING: registro < dueAtKm pero dentro del warningThreshold
+        //   intervalKm=5000, warningThresholdKm=500
+        //   Registrar 4750 km → dueAtKm=5000, kmRemaining=250 → 250 ≤ 500 → PENDING ✓
+        // EVITAR registrar > intervalKm (ej: 6000) → dueAtKm pasa a 10000, kmRemaining=4000 → SIN ALERTA
+        long tripKm = (long)(rule.intervalKm() - rule.warningThresholdKm() / 2); // 5000 - 250 = 4750
         MileageData mileageData = TestDataGenerator.mileageFor(vehicle.plate(), tripKm);
         hans.attemptsTo(NavigateTo.theMileagePage());
         hans.attemptsTo(UpdateMileage.with(mileageData));
@@ -86,8 +90,9 @@ class FullFlowTest {
         hans.attemptsTo(WaitForToast.toDisappear());
 
         // ── PASO 4: Esperar procesamiento asíncrono RabbitMQ ──────────────
-        // Excepción documentada: Thread.sleep es necesario aquí para mensajería async.
-        Thread.sleep(3000);
+        // El rules-alerts-service consume el evento y crea la alerta en su BD.
+        // 5 segundos para asegurar procesamiento en entornos con carga.
+        Thread.sleep(5000);
 
         // ── PASO 5: Consultar alertas del vehículo ────────────────────────
         hans.attemptsTo(NavigateTo.theServicesPage());

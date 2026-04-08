@@ -8,26 +8,20 @@ import net.serenitybdd.screenplay.actions.Clear;
 import net.serenitybdd.screenplay.actions.Click;
 import net.serenitybdd.screenplay.actions.Enter;
 import net.serenitybdd.screenplay.actions.SelectFromOptions;
-import net.serenitybdd.screenplay.waits.WaitUntil;
-
-import static net.serenitybdd.screenplay.matchers.WebElementStateMatchers.isClickable;
+import org.openqa.selenium.Keys;
 
 /**
  * Task: Crear una regla de mantenimiento en /rules.
  *
- * <p><b>Orden de interacción en el formulario:</b>
+ * <p>Flujo del formulario:</p>
  * <ol>
- *   <li>Escribir nombre de regla en el buscador (filtra mockMaintenanceRules)</li>
- *   <li>Esperar sugerencia del autocomplete y hacer click en ella</li>
- *   <li>Seleccionar Tipo de Mantenimiento en el select (REQUIRED — no tiene valor por defecto)</li>
- *   <li>Asegurar que km se completaron (auto-fill del autocomplete o entrada manual)</li>
- *   <li>Click en botones de tipo de vehículo (mínimo 1)</li>
+ *   <li>Escribir nombre en el buscador (activa el autocomplete)</li>
+ *   <li>Seleccionar la primera sugerencia con ARROW_DOWN + RETURN (teclado robustamente)</li>
+ *   <li>Seleccionar Tipo de Mantenimiento (select REQUIRED — independiente del autocomplete)</li>
+ *   <li>Confirmar/rellenar campos km (defensivo en caso de que el autocomplete no auto-completó)</li>
+ *   <li>Click en botones de tipo de vehículo</li>
  *   <li>Click en "Crear Regla"</li>
  * </ol>
- * </p>
- *
- * <p><b>REGLA CRÍTICA:</b> {@code ruleType} DEBE ser {@link MaintenanceRuleType}.
- * Texto libre → "No se encontraron reglas" → sin toast → test falla.</p>
  */
 public class CreateMaintenanceRule implements Task {
 
@@ -45,29 +39,35 @@ public class CreateMaintenanceRule implements Task {
     @Override
     public <T extends Actor> void performAs(T actor) {
 
-        // ── 1. Escribir en el buscador para activar el autocomplete ────────
+        // ── 1. Escribir nombre en el buscador ──────────────────────────────
         actor.attemptsTo(
                 Enter.theValue(data.name()).into(RulesForm.NAME_INPUT)
         );
 
-        // ── 2. Esperar la sugerencia y hacer click para seleccionarla ──────
-        // Al seleccionar, el frontend puede auto-completar los campos de km
-        actor.attemptsTo(
-                WaitUntil.the(RulesForm.firstSuggestion(data.name()), isClickable())
-                        .forNoMoreThan(5).seconds(),
-                Click.on(RulesForm.firstSuggestion(data.name()))
-        );
+        // ── 2. Navegar el autocomplete con teclado (ARROW_DOWN + RETURN) ──
+        // Este enfoque es robusto: no depende del selector del DOM del dropdown.
+        // ARROW_DOWN navega a la primera sugerencia; RETURN la selecciona.
+        actor.attemptsTo(Task.where("{0} selects first suggestion via keyboard",
+                a -> {
+                    try { Thread.sleep(800); } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    RulesForm.NAME_INPUT.resolveFor(a).sendKeys(Keys.ARROW_DOWN);
+                    try { Thread.sleep(300); } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    RulesForm.NAME_INPUT.resolveFor(a).sendKeys(Keys.RETURN);
+                }
+        ));
 
-        // ── 3. Seleccionar Tipo de Mantenimiento (select REQUIRED) ─────────
-        // Este campo es INDEPENDIENTE del autocomplete — NUNCA se auto-completa.
-        // El select tiene value="" por defecto (disabled) → debe seleccionarse explícitamente.
+        // ── 3. Seleccionar Tipo de Mantenimiento (select REQUIRED) ────────
+        // El dropdown de tipo NO se auto-completa desde el autocomplete.
         actor.attemptsTo(
                 SelectFromOptions.byVisibleText(data.maintenanceType().text())
                         .from(RulesForm.MAINTENANCE_TYPE_SELECT)
         );
 
-        // ── 4. Asegurar que los campos km tienen valor (por si no auto-completaron) ──
-        // Clear primero para no duplicar el valor si ya fue llenado por el autocomplete
+        // ── 4. Confirmar campos km (defensivo: rellenar si no se auto-completaron) ──
         actor.attemptsTo(
                 Clear.field(RulesForm.INTERVAL_KM_INPUT),
                 Enter.theValue(String.valueOf(data.intervalKm()))
@@ -77,7 +77,7 @@ public class CreateMaintenanceRule implements Task {
                         .into(RulesForm.WARNING_THRESHOLD_INPUT)
         );
 
-        // ── 5. Seleccionar tipos de vehículo (mínimo 1 requerido) ──────────
+        // ── 5. Seleccionar tipos de vehículo (mínimo 1) ───────────────────
         for (String vehicleType : data.vehicleTypes()) {
             actor.attemptsTo(Click.on(RulesForm.vehicleTypeButton(vehicleType)));
         }
