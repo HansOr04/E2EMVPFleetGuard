@@ -5,6 +5,7 @@ import com.fleetguard.e2e.screenplay.mileage.UpdateMileage;
 import com.fleetguard.e2e.screenplay.navigation.NavigateTo;
 import com.fleetguard.e2e.screenplay.notifications.Toast;
 import com.fleetguard.e2e.screenplay.rules.CreateMaintenanceRule;
+import com.fleetguard.e2e.screenplay.rules.MaintenanceRuleType;
 import com.fleetguard.e2e.screenplay.rules.RuleData;
 import com.fleetguard.e2e.screenplay.services.QueryAlerts;
 import com.fleetguard.e2e.screenplay.services.RegisterService;
@@ -14,6 +15,7 @@ import com.fleetguard.e2e.screenplay.utils.TestDataGenerator;
 import com.fleetguard.e2e.screenplay.utils.WaitForToast;
 import com.fleetguard.e2e.screenplay.vehicle.RegisterVehicle;
 import com.fleetguard.e2e.screenplay.vehicle.VehicleData;
+import com.fleetguard.e2e.screenplay.vehicle.VehicleType;
 import net.serenitybdd.junit5.SerenityJUnit5Extension;
 import net.serenitybdd.screenplay.Actor;
 import net.serenitybdd.screenplay.annotations.CastMember;
@@ -26,9 +28,23 @@ import static net.serenitybdd.screenplay.matchers.WebElementStateMatchers.isVisi
 import static org.hamcrest.Matchers.is;
 
 /**
- * Test de ciclo completo de mantenimiento de FleetGuard.
- * Requiere que el backend (fleet-service + rules-alerts-service + RabbitMQ) esté levantado.
- * Ejecutar: docker-compose up antes de correr este test.
+ * Test de ciclo completo — flujo de negocio de FleetGuard en orden correcto.
+ *
+ * <p><b>Orden del flujo:</b>
+ * <ol>
+ *   <li>PASO 1: Registrar vehículo (/register)</li>
+ *   <li>PASO 2: Crear regla de mantenimiento (/rules) usando tipo VÁLIDO de mockMaintenanceRules</li>
+ *   <li>PASO 3: Actualizar kilometraje (/mileage) — supera el intervalo de la regla para disparar alerta</li>
+ *   <li>PASO 4: Esperar procesamiento asíncrono RabbitMQ</li>
+ *   <li>PASO 5: Consultar alertas en /services</li>
+ *   <li>PASO 6: Registrar servicio para resolver la alerta</li>
+ * </ol>
+ * </p>
+ *
+ * <p><b>Prerrequisito:</b> docker-compose up (fleet-service + rules-alerts-service + RabbitMQ).</p>
+ *
+ * <p><b>Regla elegida:</b> {@link MaintenanceRuleType#ACEITE_MOTOR_LIVIANO} — intervalKm=5000.
+ * Se registran 6000 km para superar el umbral y disparar la alerta.</p>
  */
 @ExtendWith(SerenityJUnit5Extension.class)
 class FullFlowTest {
@@ -39,37 +55,44 @@ class FullFlowTest {
     @Test
     void shouldCompleteFullMaintenanceLifecycle() throws InterruptedException {
 
-        // PASO 1: Crear regla de mantenimiento para tipo Sedán
-        RuleData rule = TestDataGenerator.uniqueRuleData("Sedán");
-        hans.attemptsTo(NavigateTo.theRulesPage());
-        hans.attemptsTo(CreateMaintenanceRule.with(rule));
-        hans.attemptsTo(WaitForToast.toAppear());
-        hans.attemptsTo(WaitForToast.toDisappear());
-
-        // PASO 2: Registrar vehículo Sedán
-        VehicleData vehicle = TestDataGenerator.uniqueVehicleData("Sedán");
+        // ── PASO 1: Registrar el vehículo ─────────────────────────────────
+        // Debe existir ANTES de crear la regla.
+        // VehicleType.SEDAN → "Sedán" → UUID en BD y botón en /rules
+        VehicleData vehicle = TestDataGenerator.uniqueVehicleData(VehicleType.SEDAN);
         hans.attemptsTo(NavigateTo.theRegisterPage());
         hans.attemptsTo(RegisterVehicle.with(vehicle));
         hans.attemptsTo(WaitForToast.toAppear());
         hans.attemptsTo(WaitForToast.toDisappear());
 
-        // PASO 3: Registrar km alto que dispare la alerta
-        // La regla tiene intervalKm=10000; registrar 12000 supera el umbral
-        MileageData mileageData = TestDataGenerator.mileageFor(vehicle.plate(), 12000L);
+        // ── PASO 2: Crear regla de mantenimiento para tipo Sedán ──────────
+        // ACEITE_MOTOR_LIVIANO → intervalKm=5000, warningThresholdKm=500
+        // Registrar 6000 km en el paso 3 superará este intervalo → dispara alerta
+        RuleData rule = TestDataGenerator.ruleFor(
+                MaintenanceRuleType.ACEITE_MOTOR_LIVIANO,
+                VehicleType.SEDAN
+        );
+        hans.attemptsTo(NavigateTo.theRulesPage());
+        hans.attemptsTo(CreateMaintenanceRule.with(rule));
+        hans.attemptsTo(WaitForToast.toAppear());
+        hans.attemptsTo(WaitForToast.toDisappear());
+
+        // ── PASO 3: Actualizar kilometraje ────────────────────────────────
+        // 6000 km > intervalKm(5000) → el rules-alerts-service generará la alerta
+        long tripKm = (long) rule.intervalKm() + 1000L; // 5000 + 1000 = 6000
+        MileageData mileageData = TestDataGenerator.mileageFor(vehicle.plate(), tripKm);
         hans.attemptsTo(NavigateTo.theMileagePage());
         hans.attemptsTo(UpdateMileage.with(mileageData));
         hans.attemptsTo(WaitForToast.toAppear());
         hans.attemptsTo(WaitForToast.toDisappear());
 
-        // PASO 4: Esperar procesamiento asíncrono RabbitMQ (3 segundos)
-        // EXCEPCIÓN a la regla de no usar Thread.sleep() — necesario para mensajería async
+        // ── PASO 4: Esperar procesamiento asíncrono RabbitMQ ──────────────
+        // Excepción documentada: Thread.sleep es necesario aquí para mensajería async.
         Thread.sleep(3000);
 
-        // PASO 5: Ir a /services y consultar alertas
+        // ── PASO 5: Consultar alertas del vehículo ────────────────────────
         hans.attemptsTo(NavigateTo.theServicesPage());
         hans.attemptsTo(QueryAlerts.forPlate(vehicle.plate()));
 
-        // PASO 6: Verificar que aparece la alerta generada
         hans.attemptsTo(
                 WaitUntil.the(ServicesForm.FIRST_ALERT, isVisible()).forNoMoreThan(15).seconds()
         );
@@ -77,20 +100,19 @@ class FullFlowTest {
                 actor -> ServicesForm.FIRST_ALERT.resolveFor(actor).isVisible(), is(true)
         ));
 
-        // PASO 7: Llenar formulario de servicio y registrar
+        // ── PASO 6: Registrar el servicio para resolver la alerta ─────────
         ServiceData serviceData = new ServiceData(
                 vehicle.plate(),
                 "Técnico E2E Full Flow",
                 TestDataGenerator.today(),
                 "Taller FleetGuard E2E",
                 "200.00",
-                "Mantenimiento preventivo E2E – ciclo completo",
-                "12000"
+                "Cambio de aceite motor liviano E2E – ciclo completo",
+                String.valueOf(tripKm)
         );
         hans.attemptsTo(RegisterService.with(serviceData));
-
-        // PASO 8: Verificar toast de éxito
         hans.attemptsTo(WaitForToast.toAppear());
+
         hans.should(seeThat(Toast.isVisible(), is(true)));
     }
 }
